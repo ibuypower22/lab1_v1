@@ -6,9 +6,12 @@ import javafx.scene.control.Button;
 import javafx.scene.control.TextArea;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
-import org.antlr.v4.runtime.ANTLRInputStream;
-import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.tree.ParseTreeWalker;
 
+import java.util.*;
+
+import org.antlr.v4.runtime.Token;
 
 public class HelloApplication extends Application {
 
@@ -18,40 +21,324 @@ public class HelloApplication extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        primaryStage.setTitle("Lexical Analyzer");
+        primaryStage.setTitle("Lexical and Syntax Analyzers");
 
         TextArea codeTextArea = new TextArea();
         codeTextArea.setWrapText(true);
 
-        TextArea resultTextArea = new TextArea();
-        resultTextArea.setEditable(false);
+        TextArea lexicalResultTextArea = new TextArea();
+        lexicalResultTextArea.setEditable(false);
+
+        TextArea syntaxResultTextArea = new TextArea();
+        syntaxResultTextArea.setEditable(false);
+
+        TextArea symbolTableTextArea = new TextArea();
+        symbolTableTextArea.setEditable(false);
 
         Button analyzeButton = new Button("Analyze");
         analyzeButton.setOnAction(e -> {
             String code = codeTextArea.getText();
             java_lex lexer = new java_lex(new ANTLRInputStream(code));
+            CommonTokenStream tokens = new CommonTokenStream(lexer);
+            java_pars parser = new java_pars(tokens);
 
-            StringBuilder result = new StringBuilder();
+            StringBuilder lexicalResult = new StringBuilder();
+            StringBuilder syntaxResult = new StringBuilder();
 
-            Token token;
-            while ((token = lexer.nextToken()).getType() != Token.EOF) {
-                result.append("Token: ").append(lexer.getVocabulary().getSymbolicName(token.getType()))
-                        .append(", Text: ").append(token.getText())
-                        .append(", Line: ").append(token.getLine())
-                        .append(", Position: ").append(token.getCharPositionInLine())
+            // Создаем таблицу символов и множество использованных переменных
+            HashMap<String, SymbolInfo> symbolTable = new HashMap<>();
+            Set<String> usedVariables = new HashSet<>();
+
+            java_pars.ProgramContext tree = parser.program();
+
+            MyListener listener = new MyListener(symbolTable, usedVariables);
+            ParseTreeWalker walker = new ParseTreeWalker();
+            walker.walk(listener, tree);
+            symbolTable.keySet().stream()
+                    .filter(var -> !usedVariables.contains(var))
+                    .forEach(var -> System.err.println("Warning: Variable " + var + " declared but never used."));
+            // Обработка результатов лексического анализа
+            for (Token token : tokens.getTokens()) {
+                String symbolicName = lexer.getVocabulary().getSymbolicName(token.getType());
+                String text = token.getText();
+                int line = token.getLine();
+                int position = token.getCharPositionInLine();
+
+                lexicalResult.append("Token: ").append(symbolicName)
+                        .append(", Text: ").append(text)
+                        .append(", Line: ").append(line)
+                        .append(", Position: ").append(position)
                         .append("\n");
             }
 
-            resultTextArea.setText(result.toString());
+            // Проверяем наличие ошибок синтаксического анализа
+            int syntaxErrors = parser.getNumberOfSyntaxErrors();
+            if (syntaxErrors > 0) {
+                syntaxResult.append("Syntax errors found: ").append(syntaxErrors).append("\n");
+                syntaxResultTextArea.setText(syntaxResult.toString());
+                syntaxResultTextArea.setStyle("-fx-text-fill: red; -fx-font-weight: bold;");
+            } else {
+                syntaxResultTextArea.setText("No syntax errors found.\n");
+                syntaxResultTextArea.setStyle("-fx-text-fill: green; -fx-font-weight: bold;");
+            }
+
+            StringBuilder symbolTableResult = new StringBuilder("Symbol Table:\n");
+            for (String variable : symbolTable.keySet()) {
+                SymbolInfo info = symbolTable.get(variable);
+                symbolTableResult.append(variable).append(": Type: ").append(info.type).append(", Line: ").append(info.line).append("\n");
+            }
+            symbolTableTextArea.setText(symbolTableResult.toString());
+
+            lexicalResultTextArea.setText(lexicalResult.toString());
         });
 
         VBox root = new VBox(10);
-        root.getChildren().addAll(codeTextArea, analyzeButton, resultTextArea);
+        root.getChildren().addAll(codeTextArea, analyzeButton, lexicalResultTextArea, syntaxResultTextArea, symbolTableTextArea);
 
-        Scene scene = new Scene(root, 600, 400);
+        Scene scene = new Scene(root, 800, 600);
         primaryStage.setScene(scene);
 
         primaryStage.show();
     }
 
 }
+
+class MyListener extends java_parsBaseListener {
+    private HashMap<String, SymbolInfo> symbolTable;
+    private HashMap<String, MethodInfo> methodTable;
+    private Set<String> usedVariables;
+    private Set<String> errorMessages = new HashSet<>();
+
+    public MyListener(HashMap<String, SymbolInfo> symbolTable, Set<String> usedVariables) {
+        this.symbolTable = symbolTable;
+        this.usedVariables = usedVariables;
+        this.methodTable = new HashMap<>();
+    }
+    @Override
+    public void enterDeclaration(java_pars.DeclarationContext ctx) {
+        String type = ctx.TYPE().getText();
+        for (int i = 0; i < ctx.VARIABLE().size(); i++) {
+            String variableName = ctx.VARIABLE(i).getText();
+            int line = ctx.getStart().getLine();
+
+            if (symbolTable.containsKey(variableName)) {
+                System.err.println("Error: Variable " + variableName + " is declared multiple times (line " + line + ").");
+            } else {
+                symbolTable.put(variableName, new SymbolInfo(line, type));
+            }
+                if (ctx.ASSIGN(i) != null) {
+                    String expressionType = getExpressionType(ctx.expression(i));
+                    if (!isTypeCompatible(type, expressionType)) {
+                        System.err.println("Error: Incompatible types in declaration for variable " + variableName + ". Cannot assign " + expressionType + " to " + type);
+                    }
+                }
+            }
+        }
+
+    @Override
+    public void enterAssignment(java_pars.AssignmentContext ctx) {
+        String variableName = ctx.VARIABLE().getText();
+        usedVariables.add(variableName); // Mark as used since it's being assigned
+
+        if (!symbolTable.containsKey(variableName)) {
+            String errorMessage = "Error: Variable " + variableName + " is used before its declaration.";
+            if (!errorMessages.contains(errorMessage)) {
+                System.err.println(errorMessage);
+                errorMessages.add(errorMessage);
+            }
+            return;
+        }
+
+        String variableType = symbolTable.get(variableName).type;
+        String expressionType = getExpressionType(ctx.expression());
+
+        if (!isTypeCompatible(variableType, expressionType)) {
+            String typeErrorMessage = "Error: Incompatible types in assignment for variable " + variableName + ". Cannot assign " + expressionType + " to " + variableType + ".";
+            if (!errorMessages.contains(typeErrorMessage)) {
+                System.err.println(typeErrorMessage);
+                errorMessages.add(typeErrorMessage);
+            }
+        }
+    }
+    private boolean isTypeCompatible(String variableType, String expressionType) {
+        if (variableType.equals(expressionType)) return true;
+
+        if ("int".equals(variableType) && "float".equals(expressionType) || "double".equals(expressionType)) {
+            // Присваивание float или double к int не разрешено без явного преобразования
+            return false;
+        }
+        if ("float".equals(variableType) && "double".equals(expressionType)) {
+            // Присваивание double к float не разрешено без явного преобразования
+            return false;
+        }
+        if ("double".equals(variableType) && ("int".equals(expressionType) || "float".equals(expressionType))) {
+            // Присваивание int или float к double разрешено
+            return true;
+        }
+        return false;
+    }
+    @Override
+    public void enterExpression(java_pars.ExpressionContext ctx) {
+        String type = "int";
+
+        for (java_pars.TermContext termCtx : ctx.term()) {
+            String termType = getTermType(termCtx);
+
+            // Если встретили тип double, обновляем тип всего выражения
+            if ("double".equals(termType)) {
+                type = "double";
+                break;
+            }
+
+            if (!"error".equals(termType) && !"double".equals(type)) {
+                type = termType;
+            }
+        }
+
+        ctx.type = type;
+       // System.out.println("Expression type: " + type);
+    }
+    @Override
+    public void enterTerm(java_pars.TermContext ctx) {
+        String type = null;
+        for (java_pars.FactorContext factorCtx : ctx.factor()) {
+            if (type == null) {
+                type = getFactorType(factorCtx);
+            } else {
+                if (!type.equals(getFactorType(factorCtx))) {
+                    type = "error";
+                    break;
+                }
+            }
+        }
+        ctx.type = type;
+        //System.out.println("Term type: " + type);
+    }
+    @Override
+    public void enterFactor(java_pars.FactorContext ctx) {
+        if (ctx.VARIABLE() != null) {
+            String variableName = ctx.VARIABLE().getText();
+            usedVariables.add(variableName); // Mark as used
+
+            if (!symbolTable.containsKey(variableName)) {
+                String errorMessage = "Error: Variable " + variableName + " is used before its declaration.";
+                if (!errorMessages.contains(errorMessage)) {
+                    System.err.println(errorMessage);
+                    errorMessages.add(errorMessage);
+                }
+                ctx.type = "error";
+            } else {
+                ctx.type = symbolTable.get(variableName).type;
+            }
+        } else if (ctx.integer() != null) {
+            ctx.type = "int";
+        } else if (ctx.float_() != null) {
+            ctx.type = "float";
+        } else if (ctx.double_() != null) {
+            ctx.type = "double";
+        } else if (ctx.expression() != null) {
+            ctx.type = getExpressionType(ctx.expression());
+        } else {
+            ctx.type = "error";
+        }
+        //System.out.println("Factor type: " + type);
+    }
+    private String getExpressionType(java_pars.ExpressionContext ctx) {
+        String type = "int";
+        for (java_pars.TermContext termCtx : ctx.term()) {
+            String termType = getTermType(termCtx);
+            // Логика обновления типа выражения на основе типов термов
+            if ("double".equals(termType)) {
+                type = "double"; // Присваиваем высший приоритет типу "double"
+                break; // Завершаем обработку, так как "double" имеет наивысший приоритет
+            } else if ("float".equals(termType) && !"double".equals(type)) {
+                type = "float"; // Присваиваем тип "float", если не встретили "double"
+            }
+        }
+        return type;
+    }
+    private String getTermType(java_pars.TermContext ctx) {
+        String type = "int";
+        for (java_pars.FactorContext factorCtx : ctx.factor()) {
+            String factorType = getFactorType(factorCtx);
+            // Логика обновления типа терма на основе типов факторов
+            if ("double".equals(factorType)) {
+                return "double"; // Возвращаем "double", если хотя бы один фактор типа "double"
+            } else if ("float".equals(factorType) && !"double".equals(type)) {
+                type = "float";
+            }
+        }
+        return type;
+    }
+    private String getFactorType(java_pars.FactorContext ctx) {
+        if (ctx.VARIABLE() != null) {
+            String variableName = ctx.VARIABLE().getText();
+            if (symbolTable.containsKey(variableName)) {
+                return symbolTable.get(variableName).type;
+            } else {
+                String errorMessage = "Error: Variable " + variableName + " is used before its declaration.";
+                if (!errorMessages.contains(errorMessage)) {
+                    System.err.println(errorMessage);
+                    errorMessages.add(errorMessage);
+                }
+                return "unknown";
+            }
+        } else if (ctx.integer() != null) {
+            return "int";
+        } else if (ctx.float_() != null) {
+            return "float";
+        } else if (ctx.double_() != null) {
+            return "double";
+        } else if (ctx.expression() != null) {
+            return getExpressionType(ctx.expression());
+        }
+        return "unknown";
+    }
+    @Override
+    public void enterMethod_declaration(java_pars.Method_declarationContext ctx) {
+        String methodName = ctx.VARIABLE().getText();
+        MethodInfo methodInfo = new MethodInfo();
+        if (ctx.parameter_list() != null) {
+            for (java_pars.ParameterContext paramCtx : ctx.parameter_list().parameter()) {
+                String type = paramCtx.TYPE().getText();
+                methodInfo.parameterTypes.add(type);
+            }
+        }
+        methodTable.put(methodName, methodInfo);
+    }
+    @Override
+    public void enterMethod_call(java_pars.Method_callContext ctx) {
+        String methodName = ctx.VARIABLE().getText();
+        if (!methodTable.containsKey(methodName)) {
+            String errorMessage = "Method " + methodName + " not defined.";
+            if (!errorMessages.contains(errorMessage)) {
+                System.err.println(errorMessage);
+                errorMessages.add(errorMessage);
+            }
+            return;
+        }
+        MethodInfo methodInfo = methodTable.get(methodName);
+        List<String> expectedTypes = methodInfo.parameterTypes;
+        List<java_pars.ExpressionContext> args = ctx.expression_list() != null ? ctx.expression_list().expression() : new ArrayList<>();
+        if (args.size() != expectedTypes.size()) {
+            System.err.println("Method " + methodName + " called with incorrect number of arguments.");
+            return;
+        }
+        for (int i = 0; i < args.size(); i++) {
+            String argType = getExpressionType(args.get(i));
+            if (!argType.equals(expectedTypes.get(i))) {
+                System.err.println("Argument " + (i + 1) + " of method " + methodName + " has incorrect type: expected " + expectedTypes.get(i) + ", got " + argType);
+            }
+        }
+    }
+}
+
+class MethodInfo {
+    public List<String> parameterTypes;
+
+    public MethodInfo() {
+        this.parameterTypes = new ArrayList<>();
+    }
+}
+
+

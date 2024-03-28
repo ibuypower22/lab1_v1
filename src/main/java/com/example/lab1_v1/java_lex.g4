@@ -1,7 +1,7 @@
 lexer grammar java_lex;
 
 IMPORT: 'import';
-TYPE: 'int'|'float'|'double'|'char'|'string'|'long'|'boolean'|'void';
+TYPE: 'int'|'float'|'double'|'char'|'string'|'long'|'boolean';
 FOR: 'for';
 IF: 'if';
 ELSE: 'else';
@@ -27,8 +27,11 @@ LSBRACE: '[';
 RSBRACE: ']';
 INC: '++';
 DEC: '--';
+RETURN: 'return';
+VOID: 'void';
 LINE_COMMENT: '//' ~[\r\n]* -> skip;
 BLOCK_COMMENT: '/*' .*? '*/' -> skip;
 NEWLINE: [ \t\r\n]+ -> skip;
 VARIABLE: [A-Za-z_]+ ;
-NUMBER : [0-9]+ ;
+INTEGER: [0-9]+ ;
+FLOAT: [0-9]+'.'[0-9]+ ;

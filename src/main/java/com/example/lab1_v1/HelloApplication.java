@@ -117,7 +117,7 @@ public class HelloApplication extends Application {
                 int exitValue = nasmProcess.waitFor();
                 if (exitValue != 0) {
                     System.out.println("Obj file has not been saved");
-                    return; // Останавливаем выполнение, если была ошибка
+                    return;
                 } else {
                     System.out.println("Obj file successfully saved");
                 }
@@ -509,6 +509,3 @@ class AsmInstruction {
         return operation + " " + destination + ", " + String.join(", ", operands);
     }
 }
-
-
-

@@ -9,6 +9,9 @@ import javafx.stage.Stage;
 import org.antlr.v4.runtime.*;
 import org.antlr.v4.runtime.tree.ParseTreeWalker;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.*;
 
 import org.antlr.v4.runtime.Token;
@@ -34,6 +37,9 @@ public class HelloApplication extends Application {
 
         TextArea symbolTableTextArea = new TextArea();
         symbolTableTextArea.setEditable(false);
+
+        TextArea AsmResultTextArea = new TextArea();
+        AsmResultTextArea.setEditable(false);
 
         Button analyzeButton = new Button("Analyze");
         analyzeButton.setOnAction(e -> {
@@ -90,10 +96,57 @@ public class HelloApplication extends Application {
             symbolTableTextArea.setText(symbolTableResult.toString());
 
             lexicalResultTextArea.setText(lexicalResult.toString());
+
+            String assemblyCode = listener.getAssemblyCode();
+            AsmResultTextArea.setText(assemblyCode);
+
+            // Запись сгенерированного ассемблеровского кода в файл.
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter("output.asm"))) {
+                writer.write(assemblyCode);
+                System.out.println("Assembly code has been saved to output.asm");
+            } catch (IOException ex) {
+                ex.printStackTrace();
+                System.out.println("Failed to save assembly code.");
+            }
+
+            ProcessBuilder nasmProcessBuilder = new ProcessBuilder("nasm", "-f", "win64", "output.asm", "-o", "output.obj");
+            nasmProcessBuilder.redirectErrorStream(true);
+            Process nasmProcess;
+            try {
+                nasmProcess = nasmProcessBuilder.start();
+                int exitValue = nasmProcess.waitFor();
+                if (exitValue != 0) {
+                    System.out.println("Obj file has not been saved");
+                    return; // Останавливаем выполнение, если была ошибка
+                } else {
+                    System.out.println("Obj file successfully saved");
+                }
+            } catch (IOException | InterruptedException ex) {
+                ex.printStackTrace();
+                System.out.println("Asm file recognition failed");
+                return;
+            }
+
+            ProcessBuilder linkProcessBuilder = new ProcessBuilder("link", "output.obj", "/OUT:output.exe", "/SUBSYSTEM:CONSOLE", "/ENTRY:_start", "/LARGEADDRESSAWARE:NO");
+            linkProcessBuilder.redirectErrorStream(true);
+            Process linkProcess;
+            try {
+                linkProcess = linkProcessBuilder.start();
+                int exitValue = linkProcess.waitFor();
+                if (exitValue != 0) {
+                    System.out.println("Linking failed");
+                } else {
+                    System.out.println("Linking succeeded. The exe file has been created");
+                }
+            } catch (IOException | InterruptedException ex) {
+                ex.printStackTrace();
+                System.out.println("Link file recognition failed");
+            }
         });
 
         VBox root = new VBox(10);
-        root.getChildren().addAll(codeTextArea, analyzeButton, lexicalResultTextArea, syntaxResultTextArea, symbolTableTextArea);
+        root.getChildren().addAll(codeTextArea, analyzeButton, lexicalResultTextArea, syntaxResultTextArea, symbolTableTextArea, AsmResultTextArea);
+
 
         Scene scene = new Scene(root, 800, 600);
         primaryStage.setScene(scene);
@@ -104,41 +157,133 @@ public class HelloApplication extends Application {
 }
 
 class MyListener extends java_parsBaseListener {
-    private HashMap<String, SymbolInfo> symbolTable;
-    private HashMap<String, MethodInfo> methodTable;
-    private Set<String> usedVariables;
-    private Set<String> errorMessages = new HashSet<>();
+    private final HashMap<String, SymbolInfo> symbolTable;
+    private final HashMap<String, MethodInfo> methodTable;
+    private final Set<String> usedVariables;
+    private final Set<String> errorMessages = new HashSet<>();
+    private final List<AsmInstruction> asmInstructions = new ArrayList<>();
+
 
     public MyListener(HashMap<String, SymbolInfo> symbolTable, Set<String> usedVariables) {
         this.symbolTable = symbolTable;
         this.usedVariables = usedVariables;
         this.methodTable = new HashMap<>();
     }
+
     @Override
     public void enterDeclaration(java_pars.DeclarationContext ctx) {
         String type = ctx.TYPE().getText();
         for (int i = 0; i < ctx.VARIABLE().size(); i++) {
             String variableName = ctx.VARIABLE(i).getText();
-            int line = ctx.getStart().getLine();
-
-            if (symbolTable.containsKey(variableName)) {
-                System.err.println("Error: Variable " + variableName + " is declared multiple times (line " + line + ").");
-            } else {
-                symbolTable.put(variableName, new SymbolInfo(line, type));
-            }
+            if (!symbolTable.containsKey(variableName)) {
+                symbolTable.put(variableName, new SymbolInfo(ctx.getStart().getLine(), type));
+                addVariableToDataSection(variableName);
                 if (ctx.ASSIGN(i) != null) {
-                    String expressionType = getExpressionType(ctx.expression(i));
-                    if (!isTypeCompatible(type, expressionType)) {
-                        System.err.println("Error: Incompatible types in declaration for variable " + variableName + ". Cannot assign " + expressionType + " to " + type);
+                    String register = getRegisterForVariable(variableName);
+                    // Обработка выражения с присвоением результата в регистр
+                    processExpression(ctx.expression(i), register);
+                    // Сохранение результата из регистра в память, где хранится переменная
+                    asmInstructions.add(new AsmInstruction("MOV", "[" + variableName + "]", Arrays.asList(register)));
+
+                }
+            } else {
+                System.err.println("Error: Variable " + variableName + " is declared multiple times.");
+            }
+        }
+    }
+
+    private final Map<String, String> variableToRegisterMapping = new HashMap<>();
+    private final List<String> availableRegisters = Arrays.asList("EAX", "EBX", "ECX", "EDX");
+    private int registerCounter = 0;
+
+    private String getRegisterForVariable(String variableName) {
+        if (!variableToRegisterMapping.containsKey(variableName)) {
+            String register = availableRegisters.get(registerCounter % availableRegisters.size());
+            variableToRegisterMapping.put(variableName, register);
+            registerCounter++;
+            return register;
+        }
+        return variableToRegisterMapping.get(variableName);
+    }
+
+    private final List<String> dataSection = new ArrayList<>();
+
+    private void addVariableToDataSection(String variableName) {
+
+        dataSection.add(variableName + ": " + "dd" + " 0");
+    }
+
+    public String getAssemblyCode() {
+        StringBuilder assemblyCode = new StringBuilder();
+        // Добавление секции данных
+        if (!dataSection.isEmpty()) {
+            assemblyCode.append("section .data\n");
+            for (String data : dataSection) {
+                assemblyCode.append("    ").append(data).append("\n");
+            }
+            assemblyCode.append("\n");
+        }
+
+        // Добавление секции текста с инструкциями
+        assemblyCode.append("section .text\n");
+        assemblyCode.append("global _start\n");
+        assemblyCode.append("\n");
+        assemblyCode.append("_start:\n");
+        for (AsmInstruction instruction : asmInstructions) {
+            assemblyCode.append("  ").append(instruction.toString()).append("\n");
+        }
+
+        assemblyCode.append("\n");
+        assemblyCode.append("    MOV EAX, 1\n");
+        assemblyCode.append("    MOV EBX, 0\n");
+        assemblyCode.append("    int 0x80");
+        return assemblyCode.toString();
+    }
+
+    private String processExpression(java_pars.ExpressionContext expression, String destinationRegister) {
+        if (expression.getChildCount() == 1) {
+            asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList(expression.getText())));
+        } else {
+
+            for (int i = 0; i < expression.getChildCount(); i += 2) {
+                String operand = expression.getChild(i).getText();
+                if (i == 0) {
+                    asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList(operand)));
+                } else {
+                    String operator = expression.getChild(i - 1).getText();
+                    // Важное изменение: удаляем resultReg из списка операндов, где это необходимо
+                    if (operator.equals("+") || operator.equals("-") || operator.equals("*") || operator.equals("/")) {
+                        // Для операций ADD, SUB, MUL, DIV добавляем только второй операнд
+                        asmInstructions.add(new AsmInstruction(convertOpToAsm(operator), destinationRegister, Arrays.asList(operand)));
+                    } else {
+                        asmInstructions.add(new AsmInstruction(convertOpToAsm(operator), destinationRegister, Arrays.asList(destinationRegister, operand)));
                     }
                 }
             }
         }
+        return destinationRegister;
+    }
+
+    private String convertOpToAsm(String op) {
+        return switch (op) {
+            case "+" -> "ADD";
+            case "-" -> "SUB";
+            case "*" -> "IMUL";
+            case "/" -> "DIV";
+            default -> "UNKNOWN_OP";
+        };
+    }
 
     @Override
     public void enterAssignment(java_pars.AssignmentContext ctx) {
+        //System.out.println("Assignment encountered: " + ctx.getText());
         String variableName = ctx.VARIABLE().getText();
-        usedVariables.add(variableName); // Mark as used since it's being assigned
+        String register = getRegisterForVariable(variableName);
+        String resultVar = processExpression(ctx.expression(), register);
+
+        // Используем имя переменной с результатом для присваивания целевой переменной
+        asmInstructions.add(new AsmInstruction("MOV", variableName, Arrays.asList(resultVar)));
+        usedVariables.add(variableName);
 
         if (!symbolTable.containsKey(variableName)) {
             String errorMessage = "Error: Variable " + variableName + " is used before its declaration.";
@@ -160,6 +305,7 @@ class MyListener extends java_parsBaseListener {
             }
         }
     }
+
     private boolean isTypeCompatible(String variableType, String expressionType) {
         if (variableType.equals(expressionType)) return true;
 
@@ -177,27 +323,26 @@ class MyListener extends java_parsBaseListener {
         }
         return false;
     }
+
     @Override
     public void enterExpression(java_pars.ExpressionContext ctx) {
         String type = "int";
 
         for (java_pars.TermContext termCtx : ctx.term()) {
             String termType = getTermType(termCtx);
-
-            // Если встретили тип double, обновляем тип всего выражения
             if ("double".equals(termType)) {
-                type = "double";
-                break;
-            }
-
-            if (!"error".equals(termType) && !"double".equals(type)) {
+                type = "double"; // Если находим "double", обновляем тип выражения
+                break; // Нет необходимости продолжать анализ, "double" имеет высший приоритет
+            } else if ("float".equals(termType) && !"double".equals(type)) {
+                type = "float"; // Обновляем тип до "float", если ранее не встретили "double"
+            } else if (!"error".equals(termType)) {
                 type = termType;
             }
         }
-
         ctx.type = type;
-       // System.out.println("Expression type: " + type);
+        // System.out.println("Expression type: " + type);
     }
+
     @Override
     public void enterTerm(java_pars.TermContext ctx) {
         String type = null;
@@ -214,11 +359,12 @@ class MyListener extends java_parsBaseListener {
         ctx.type = type;
         //System.out.println("Term type: " + type);
     }
+
     @Override
     public void enterFactor(java_pars.FactorContext ctx) {
         if (ctx.VARIABLE() != null) {
             String variableName = ctx.VARIABLE().getText();
-            usedVariables.add(variableName); // Mark as used
+            usedVariables.add(variableName);
 
             if (!symbolTable.containsKey(variableName)) {
                 String errorMessage = "Error: Variable " + variableName + " is used before its declaration.";
@@ -243,6 +389,7 @@ class MyListener extends java_parsBaseListener {
         }
         //System.out.println("Factor type: " + type);
     }
+
     private String getExpressionType(java_pars.ExpressionContext ctx) {
         String type = "int";
         for (java_pars.TermContext termCtx : ctx.term()) {
@@ -257,6 +404,7 @@ class MyListener extends java_parsBaseListener {
         }
         return type;
     }
+
     private String getTermType(java_pars.TermContext ctx) {
         String type = "int";
         for (java_pars.FactorContext factorCtx : ctx.factor()) {
@@ -270,6 +418,7 @@ class MyListener extends java_parsBaseListener {
         }
         return type;
     }
+
     private String getFactorType(java_pars.FactorContext ctx) {
         if (ctx.VARIABLE() != null) {
             String variableName = ctx.VARIABLE().getText();
@@ -294,6 +443,7 @@ class MyListener extends java_parsBaseListener {
         }
         return "unknown";
     }
+
     @Override
     public void enterMethod_declaration(java_pars.Method_declarationContext ctx) {
         String methodName = ctx.VARIABLE().getText();
@@ -306,6 +456,7 @@ class MyListener extends java_parsBaseListener {
         }
         methodTable.put(methodName, methodInfo);
     }
+
     @Override
     public void enterMethod_call(java_pars.Method_callContext ctx) {
         String methodName = ctx.VARIABLE().getText();
@@ -331,6 +482,7 @@ class MyListener extends java_parsBaseListener {
             }
         }
     }
+
 }
 
 class MethodInfo {
@@ -340,5 +492,23 @@ class MethodInfo {
         this.parameterTypes = new ArrayList<>();
     }
 }
+
+class AsmInstruction {
+    String operation;
+    String destination;
+    List<String> operands;
+
+    public AsmInstruction(String operation, String destination, List<String> operands) {
+        this.operation = operation;
+        this.destination = destination;
+        this.operands = operands != null ? operands : new ArrayList<>();
+    }
+
+    @Override
+    public String toString() {
+        return operation + " " + destination + ", " + String.join(", ", operands);
+    }
+}
+
 
 

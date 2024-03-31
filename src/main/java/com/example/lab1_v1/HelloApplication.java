@@ -235,47 +235,50 @@ class MyListener extends java_parsBaseListener {
 
         assemblyCode.append("\n");
         assemblyCode.append("    MOV EAX, 1\n");
-        assemblyCode.append("    MOV EBX, 0\n");
+        assemblyCode.append("    XOR EBX, EBX\n");
         assemblyCode.append("    int 0x80");
         return assemblyCode.toString();
     }
 
     private String processExpression(java_pars.ExpressionContext expression, String destinationRegister) {
-        // Переменная для хранения регистра делителя
-        String divisorRegister = "EBX";
+        String resultRegister = "EAX"; // Результат всегда будет в EAX
 
         for (int i = 0; i < expression.getChildCount(); i += 2) {
             String operand = expression.getChild(i).getText();
-            if (i == 0 && expression.getChildCount() > 1) {
-                // Загружаем первый операнд в destinationRegister только если он не единственный
-                asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList(operand)));
-            } else if (i > 0) {
-                String operator = expression.getChild(i - 1).getText();
-                if (operator.equals("/")) {
-                    // Перед делением подготавливаем EAX и EDX, и загружаем делитель в divisorRegister
-                    asmInstructions.add(new AsmInstruction("MOV", divisorRegister, Arrays.asList(operand))); // Загружаем делитель
-                    asmInstructions.add(new AsmInstruction("MOV", "EAX", Arrays.asList(destinationRegister))); // Перемещаем делимое в EAX
-                    asmInstructions.add(new AsmInstruction("XOR", "EDX", Arrays.asList("EDX"))); // Обнуляем EDX
-                    asmInstructions.add(new AsmInstruction("IDIV", divisorRegister, new ArrayList<>())); // Выполняем деление
-                    asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList("EAX"))); // Сохраняем результат обратно в destinationRegister
-                } else {
-                    // Для всех операций кроме деления
-                    asmInstructions.add(new AsmInstruction(convertOpToAsm(operator), destinationRegister, Arrays.asList(operand)));
+            String operator = i > 0 ? expression.getChild(i - 1).getText() : null;
+
+            if (i == 0) {
+                // Первый операнд всегда загружаем в EAX
+                asmInstructions.add(new AsmInstruction("MOV", "EAX", Arrays.asList(operand)));
+            } else {
+                switch (operator) {
+                    case "+":
+                        asmInstructions.add(new AsmInstruction("ADD", "EAX", Arrays.asList(operand)));
+                        break;
+                    case "-":
+                        asmInstructions.add(new AsmInstruction("SUB", "EAX", Arrays.asList(operand)));
+                        break;
+                    case "*":
+                        asmInstructions.add(new AsmInstruction("IMUL", "EAX", Arrays.asList(operand)));
+                        break;
+                    case "/":
+                        prepareForDivision(operand);
+                        break;
                 }
             }
         }
-        return destinationRegister;
+        // Если целевой регистр не EAX, то переносим результат из EAX
+        if (!destinationRegister.equals("EAX")) {
+            asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList("EAX")));
+        }
+        return resultRegister;
     }
 
-
-    private String convertOpToAsm(String op) {
-        return switch (op) {
-            case "+" -> "ADD";
-            case "-" -> "SUB";
-            case "*" -> "IMUL";
-            case "/" -> "IDIV";
-            default -> "UNKNOWN_OP";
-        };
+    private void prepareForDivision(String divisor) {
+        // Загрузка делителя в EBX и выполнение операции деления
+        asmInstructions.add(new AsmInstruction("MOV", "EBX", Arrays.asList(divisor)));
+        asmInstructions.add(new AsmInstruction("XOR", "EDX", Arrays.asList("EDX"))); // Обнуляем EDX
+        asmInstructions.add(new AsmInstruction("DIV", "EBX", null)); // DIV принимает делитель в EBX
     }
 
     @Override

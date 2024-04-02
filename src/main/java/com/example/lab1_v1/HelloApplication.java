@@ -253,7 +253,6 @@ class MyListener extends java_parsBaseListener {
             } else {
                 String operator = expression.getChild(i - 1).getText();
                 if (operator.equals("/")) {
-                    // Для операции деления используем подготовленный метод, который учитывает особенности деления
                     prepareForDivision(destinationRegister, operandStr);
                 } else {
                     String asmOp = convertOpToAsm(operator);

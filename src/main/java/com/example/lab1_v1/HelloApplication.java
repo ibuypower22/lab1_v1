@@ -235,50 +235,64 @@ class MyListener extends java_parsBaseListener {
 
         assemblyCode.append("\n");
         assemblyCode.append("    MOV EAX, 1\n");
-        assemblyCode.append("    XOR EBX, EBX\n");
+        assemblyCode.append("    MOV EBX, 0\n");
         assemblyCode.append("    int 0x80");
         return assemblyCode.toString();
     }
 
     private String processExpression(java_pars.ExpressionContext expression, String destinationRegister) {
-        String resultRegister = "EAX"; // Результат всегда будет в EAX
-
         for (int i = 0; i < expression.getChildCount(); i += 2) {
             String operand = expression.getChild(i).getText();
-            String operator = i > 0 ? expression.getChild(i - 1).getText() : null;
+            boolean isOperandVariable = symbolTable.containsKey(operand); // Проверяем, является ли операнд переменной
+
+            // Формируем строку операнда, добавляя квадратные скобки, если это переменная
+            String operandStr = isOperandVariable ? "[" + operand + "]" : operand;
 
             if (i == 0) {
-                // Первый операнд всегда загружаем в EAX
-                asmInstructions.add(new AsmInstruction("MOV", "EAX", Arrays.asList(operand)));
+                asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList(operandStr)));
             } else {
-                switch (operator) {
-                    case "+":
-                        asmInstructions.add(new AsmInstruction("ADD", "EAX", Arrays.asList(operand)));
-                        break;
-                    case "-":
-                        asmInstructions.add(new AsmInstruction("SUB", "EAX", Arrays.asList(operand)));
-                        break;
-                    case "*":
-                        asmInstructions.add(new AsmInstruction("IMUL", "EAX", Arrays.asList(operand)));
-                        break;
-                    case "/":
-                        prepareForDivision(operand);
-                        break;
+                String operator = expression.getChild(i - 1).getText();
+                if (operator.equals("/")) {
+                    // Для операции деления используем подготовленный метод, который учитывает особенности деления
+                    prepareForDivision(destinationRegister, operandStr);
+                } else {
+                    String asmOp = convertOpToAsm(operator);
+                    asmInstructions.add(new AsmInstruction(asmOp, destinationRegister, Arrays.asList(operandStr)));
                 }
             }
         }
-        // Если целевой регистр не EAX, то переносим результат из EAX
+        return destinationRegister;
+    }
+
+    private void prepareForDivision(String destinationRegister, String divisor) {
+        // Обнуляем EDX перед делением
+        asmInstructions.add(new AsmInstruction("XOR", "EDX", Arrays.asList("EDX")));
+        // Загружаем делимое в EAX, если оно уже не там
+        if (!destinationRegister.equals("EAX")) {
+            asmInstructions.add(new AsmInstruction("MOV", "EAX", Arrays.asList(destinationRegister)));
+        }
+        // Загружаем делитель в EBX
+        if (divisor.startsWith("[")) {
+            // Если делитель - переменная, убираем квадратные скобки
+            divisor = divisor.substring(1, divisor.length() - 1);
+        }
+        asmInstructions.add(new AsmInstruction("MOV", "EBX", Arrays.asList(divisor)));
+        // Выполняем деление. DIV ожидает делитель в EBX и делит EAX на EBX
+        asmInstructions.add(new AsmInstruction("DIV", "EBX", new ArrayList<>()));
+        // Если результат нужно сохранить не в EAX, перемещаем его
         if (!destinationRegister.equals("EAX")) {
             asmInstructions.add(new AsmInstruction("MOV", destinationRegister, Arrays.asList("EAX")));
         }
-        return resultRegister;
     }
 
-    private void prepareForDivision(String divisor) {
-        // Загрузка делителя в EBX и выполнение операции деления
-        asmInstructions.add(new AsmInstruction("MOV", "EBX", Arrays.asList(divisor)));
-        asmInstructions.add(new AsmInstruction("XOR", "EDX", Arrays.asList("EDX"))); // Обнуляем EDX
-        asmInstructions.add(new AsmInstruction("DIV", "EBX", null)); // DIV принимает делитель в EBX
+    private String convertOpToAsm(String op) {
+        return switch (op) {
+            case "+" -> "ADD";
+            case "-" -> "SUB";
+            case "*" -> "IMUL";
+            case "/" -> "DIV";
+            default -> "UNKNOWN_OP";
+        };
     }
 
     @Override
@@ -289,7 +303,7 @@ class MyListener extends java_parsBaseListener {
         String resultVar = processExpression(ctx.expression(), register);
 
         // Используем имя переменной с результатом для присваивания целевой переменной
-        asmInstructions.add(new AsmInstruction("MOV", variableName, Arrays.asList(resultVar)));
+       asmInstructions.add(new AsmInstruction("MOV", "["+variableName+"]", Arrays.asList(resultVar)));
         usedVariables.add(variableName);
 
         if (!symbolTable.containsKey(variableName)) {
